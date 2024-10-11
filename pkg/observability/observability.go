@@ -13,7 +13,13 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+)
+
+var (
+	res *resource.Resource
 )
 
 // setupOTelSDK bootstraps the OpenTelemetry pipeline.
@@ -42,11 +48,30 @@ func SetupOTelSDK(ctx context.Context) (shutdown func(context.Context) error, er
 	prop := newPropagator()
 	otel.SetTextMapPropagator(prop)
 
+	res, err = resource.New(ctx, resource.WithFromEnv(), resource.WithTelemetrySDK(),
+		resource.WithProcess(),
+		resource.WithOS(),
+		resource.WithContainer(),
+		resource.WithHost(),
+		resource.WithAttributes(semconv.ServiceNameKey.String("gooler"),
+			semconv.ServiceVersionKey.String("0.1.0")))
+
+	if err != nil {
+		handleErr(err)
+		return nil, err
+	}
+
+	res, err = resource.Merge(resource.Default(), res)
+	if err != nil {
+		handleErr(err)
+		return nil, err
+	}
+
 	// Set up trace provider.
 	tracerProvider, err := newTraceProvider()
 	if err != nil {
 		handleErr(err)
-		return
+		return nil, err
 	}
 	shutdownFuncs = append(shutdownFuncs, tracerProvider.Shutdown)
 	otel.SetTracerProvider(tracerProvider)
@@ -55,7 +80,7 @@ func SetupOTelSDK(ctx context.Context) (shutdown func(context.Context) error, er
 	meterProvider, err := newMeterProvider()
 	if err != nil {
 		handleErr(err)
-		return
+		return nil, err
 	}
 	shutdownFuncs = append(shutdownFuncs, meterProvider.Shutdown)
 	otel.SetMeterProvider(meterProvider)
@@ -64,19 +89,20 @@ func SetupOTelSDK(ctx context.Context) (shutdown func(context.Context) error, er
 	loggerProvider, err := newLoggerProvider()
 	if err != nil {
 		handleErr(err)
-		return
+		return nil, err
 	}
 	shutdownFuncs = append(shutdownFuncs, loggerProvider.Shutdown)
 	global.SetLoggerProvider(loggerProvider)
 
-	return
+	return shutdown, nil
 }
 
 func newPropagator() propagation.TextMapPropagator {
-	return propagation.NewCompositeTextMapPropagator(
+	propagator := propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
 		propagation.Baggage{},
 	)
+	return propagator
 }
 
 func newTraceProvider() (*trace.TracerProvider, error) {
@@ -90,6 +116,7 @@ func newTraceProvider() (*trace.TracerProvider, error) {
 		trace.WithBatcher(traceExporter,
 			// Default is 5s. Set to 1s for demonstrative purposes.
 			trace.WithBatchTimeout(time.Second)),
+		trace.WithResource(res),
 	)
 	return traceProvider, nil
 }
@@ -104,6 +131,7 @@ func newMeterProvider() (*metric.MeterProvider, error) {
 		metric.WithReader(metric.NewPeriodicReader(metricExporter,
 			// Default is 1m. Set to 3s for demonstrative purposes.
 			metric.WithInterval(3*time.Second))),
+		metric.WithResource(res),
 	)
 	return meterProvider, nil
 }
@@ -116,6 +144,7 @@ func newLoggerProvider() (*log.LoggerProvider, error) {
 
 	loggerProvider := log.NewLoggerProvider(
 		log.WithProcessor(log.NewBatchProcessor(logExporter)),
+		log.WithResource(res),
 	)
 	return loggerProvider, nil
 }
